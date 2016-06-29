@@ -12,6 +12,8 @@ from threading import Thread
 import dispatcher
 import urllib2
 import tempfile
+import re
+
 
 global dispatcher
 dispatcher = dispatcher.OvirtApi()
@@ -25,12 +27,59 @@ class Client:
         gtk.main_quit(*args, **kwargs)
         sys.exit()
 
+    def __createVncFile(self,ticket):
+        return ["[virt-viewer]\n","type=vnc\n","host={}\n".format(self._host),
+                       "port={}\n".format(self._port),"password={}\n".format(ticket),"delete-this-file=1\n",
+                       "title={}\n".format(self._cmb_main_vms.get_active_text().split(" :: ")[0]),
+                       "secure-attention=ctral+alt+end"]
+
+    def __createSpiceFile(self,ticket):
+        return ["[virt-viewer]\n","type=spice\n","host={}\n".format(self._host),
+                       "port={}\n".format(self._port),"password={}\n".format(ticket),"tls-port={}\n".format(self._sport),
+                       "fullscreen={}\n".format(1 if self._fullScreen.state==1 else 0),
+                       "title={}\n".format(self._cmb_main_vms.get_active_text().split(" :: ")[0]),
+                       "enable-smartcard={}\n".format(1 if self._smartCard.state==1 else 0),
+                       "enable-usb-autoshare={}\n".format(1 if self._usbAutoShare.state==1 else 0),
+                       "delete-this-file=1\n",
+                       "usb-filter=-1,-1,-1,-1,0\n",
+                       "tls-ciphers=DEFAULT\n",
+                       "host-subject=O={0},CN={1}\n".format(self._organ,self._host),
+                       "ca={}\n".format(self._ca_content.replace("\n","\\n")),
+                       "toggle-fullscreen=shift+f11\n",
+                       "release-cursor=shift+f12\n",
+                       "secure-attention=ctrl+alt+end\n",
+                       "secure-channels=main;inputs;cursor;playback;record;display;usbredir;smardcard"]
+
+
+
     def Connect(self, button=None):
         selected_vm = self._cmb_main_vms.get_active_text().split(" :: ")[1]
         ticket, expiry = dispatcher.ticketVm(selected_vm)
+        vm = dispatcher.getVmById(selected_vm)
+        display = vm.get_display()
+        type=display.type_
+        try:
+            vvFile = open("/tmp/console.vv","w")
+            if type == "vnc":
+                t_vvContent = self.__createVncFile(ticket)
+            elif type == "spice":
+                t_vvContent = self.__createSpiceFile(ticket)
+            vvFile.writelines(t_vvContent)
+        except BaseException, e:
+            self._sta_main.push(0,"error:{}".format(e))
+            return
+        finally:
+            vvFile.close()
+        cmd = ["remote-viewer","/tmp/console.vv"]
+        subprocess.Popen(cmd)
 
-        port = "port="+str(self._port)+"&" if self._port else ""
-        sport = "tls-port="+str(self._sport)+"&" if self._sport else ""
+
+    def ConnectOld(self, button=None):
+        selected_vm = self._cmb_main_vms.get_active_text().split(" :: ")[1]
+        ticket, expiry = dispatcher.ticketVm(selected_vm)
+
+        port = "port=" + str(self._port) + "&" if self._port else ""
+        sport = "tls-port=" + str(self._sport) + "&" if self._sport else ""
         uri = "spice://%s/?%s%spassword=%s" % (self._host,
                                                port,
                                                sport,
@@ -40,7 +89,9 @@ class Client:
         if self._ca_file is not None:
             cmd.append("--spice-ca-file=%s" % self._ca_file)
 
+        print cmd
         subprocess.Popen(cmd)
+
 
     def Auth(self, button=None):
         url = self._ent_auth_server.get_text()
@@ -51,7 +102,7 @@ class Client:
         try:
             cert = urllib2.urlopen(url+cert_path).read()
             cert_file = tempfile.NamedTemporaryFile(delete=False)
-            cert_file
+            self._ca_content = cert
             cert_file.write(cert)
             cert_file.close()
 
@@ -67,6 +118,14 @@ class Client:
                                       self._ca_file)
 
         if login:
+            cert_txt = subprocess.check_output(["openssl","x509","-text","-noout","-in",self._ca_file])
+            pattarn = re.compile(r"O=(.*?),")
+            tmp = pattarn.findall(cert_txt)
+            if len(tmp) != 0:
+                self._organ = tmp[0]
+            else:
+                self._sta_auth.push(0,"get ca organization fail")
+                return
             self._sta_main.push(0, "User %s logged in" % username)
             self._window1.hide()
             self._window2.show()
@@ -108,7 +167,13 @@ class Client:
             self._lab_Display.set_text(vm.display.type_)
             self._lab_Usb.set_text(usb)
             self._lab_Status.set_text(state)
+            self._lab_Os.set_text(os)
 
+            ###########
+            #print("fullscreen is {}".format(self._fullScreen.state))
+            #print("use auto share is {}".format(self._usbAutoShare.state))
+            #print("smartcard is {}".format(self._smartCard.state))
+            ###########
             if "rhel" in os:
                 self._img_So.set_from_file(self._dir + "/images/rhel.png")
             elif "sles" in os:
@@ -123,14 +188,23 @@ class Client:
                 self._img_So.set_from_file(self._dir + "/images/ovirt.png")
 
             if state == "up" or state == "powering_up":
-                self._checkbutton1.set_sensitive(True)
+                if display.type_ == "spice":
+                    self._fullScreen.set_sensitive(True)
+                    self._usbAutoShare.set_sensitive(True)
+                    self._smartCard.set_sensitive(True)
+                else:
+                    self._fullScreen.set_sensitive(False)
+                    self._usbAutoShare.set_sensitive(False)
+                    self._smartCard.set_sensitive(False)
                 self._cmb_main_vms.set_sensitive(True)
                 self._btn_main_refresh.set_sensitive(True)
                 self._btn_main_start.set_sensitive(False)
                 self._btn_main_stop.set_sensitive(True)
                 self._btn_main_connect.set_sensitive(True)
             else:
-                self._checkbutton1.set_sensitive(True)
+                self._fullScreen.set_sensitive(False)
+                self._usbAutoShare.set_sensitive(False)
+                self._smartCard.set_sensitive(False)
                 self._cmb_main_vms.set_sensitive(True)
                 self._btn_main_refresh.set_sensitive(True)
                 self._btn_main_start.set_sensitive(True)
@@ -181,6 +255,7 @@ class Client:
         self._lab_Display = self._wTree.get_widget("label11")
         self._lab_Usb = self._wTree.get_widget("label13")
         self._lab_Status = self._wTree.get_widget("label15")
+        self._lab_Os = self._wTree.get_widget("label18")
 
         self._img_So = self._wTree.get_widget("image1")
 
@@ -188,7 +263,9 @@ class Client:
         self._btn_main_start = self._wTree.get_widget("button4")
         self._btn_main_connect = self._wTree.get_widget("button5")
         self._btn_main_stop = self._wTree.get_widget("button6")
-        self._checkbutton1 = self._wTree.get_widget("checkbutton1")
+        self._fullScreen = self._wTree.get_widget("checkbutton1")
+        self._usbAutoShare = self._wTree.get_widget("checkbutton2")
+        self._smartCard = self._wTree.get_widget("checkbutton3")
 
         self._cmb_main_vms = self._wTree.get_widget("combobox1")
         self._liststore = gtk.ListStore(gobject.TYPE_STRING)
